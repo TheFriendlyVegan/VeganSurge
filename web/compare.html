@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VeganSurge — Compare</title>
+<style>
+:root { --border:#dde3ea; --muted:#6b7480; --accent:#0a8f3c; }
+html { font-size: clamp(12.5px, 0.5vw + 8px, 17px); }
+* { box-sizing: border-box; }
+body { margin:0; font-family:"Segoe UI",system-ui,sans-serif; height:100vh; display:flex; flex-direction:column; background:#fff; color:#1c2430; }
+header { display:flex; gap:0.6rem; align-items:center; padding:0.5rem 0.9rem; border-bottom:1px solid var(--border); flex:none; flex-wrap:wrap; }
+header b { font-size:1.1rem; }
+#symInput { border:1px solid var(--border); border-radius:4px; padding:0.3rem 0.5rem; width:9rem; font-family:inherit; font-size:0.95rem; text-transform:uppercase; }
+button { border:1px solid var(--border); background:#fff; border-radius:4px; padding:0.3rem 0.7rem; cursor:pointer; font-family:inherit; font-size:0.9rem; }
+button:hover { background:#f0f3f7; }
+button.active { background:var(--accent); color:#fff; }
+.chip { display:inline-flex; align-items:center; gap:0.3rem; border:1px solid var(--border); border-radius:12px; padding:0.15rem 0.6rem; font-weight:700; font-size:0.9rem; }
+.chip i { width:0.7rem; height:0.7rem; border-radius:50%; display:inline-block; }
+.chip span { cursor:pointer; color:#aab; }
+.chip span:hover { color:#e03131; }
+#wrap { flex:1; position:relative; min-height:0; }
+canvas { position:absolute; inset:0; width:100%; height:100%; }
+</style>
+</head>
+<body>
+<header>
+  <b>Compare (% change)</b>
+  <span id="chips"></span>
+  <input id="symInput" placeholder="Add symbol…">
+  <button id="addBtn">Add</button>
+  <span style="flex:1"></span>
+  <span id="ranges">
+    <button data-d="21">1M</button><button data-d="63">3M</button>
+    <button data-d="126" class="active">6M</button><button data-d="252">1Y</button>
+    <button data-d="504">2Y</button><button data-d="1260">5Y</button>
+  </span>
+</header>
+<div id="wrap"><canvas id="cv"></canvas></div>
+<script>
+const COLORS = ["#1763b8","#e03131","#0a8f3c","#e8590c","#7048e8","#0c8599","#d6336c","#5c940d"];
+const params = new URLSearchParams(location.search);
+let syms = (params.get("syms") || "AAPL").toUpperCase().split(",").filter(Boolean).slice(0, 8);
+let days = 126;
+let series = {}; // sym -> {t:[], c:[]}
+
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+
+async function fetchSym(s) {
+  try {
+    const r = await fetch(`/api/chart?symbol=${encodeURIComponent(s)}&tf=d`);
+    if (!r.ok) throw new Error();
+    const j = await r.json();
+    series[s] = { t: j.bars.t, c: j.bars.c };
+  } catch { series[s] = null; }
+}
+
+async function load() {
+  await Promise.all(syms.filter((s) => !(s in series)).map(fetchSym));
+  renderChips();
+  draw();
+}
+
+function renderChips() {
+  document.getElementById("chips").innerHTML = syms
+    .map((s, i) =>
+      `<span class="chip"><i style="background:${COLORS[i % COLORS.length]}"></i>${s}` +
+      `<span data-s="${s}" title="Remove">✕</span></span>`)
+    .join(" ");
+  for (const x of document.querySelectorAll(".chip span[data-s]")) {
+    x.onclick = () => { syms = syms.filter((s) => s !== x.dataset.s); load(); };
+  }
+}
+
+function fontPx(f = 1) {
+  return Math.round(parseFloat(getComputedStyle(document.documentElement).fontSize) * 0.78 * f);
+}
+
+function draw() {
+  const rect = cv.parentElement.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = rect.width * dpr; cv.height = rect.height * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // right gutter wide enough for "SYMBL +123.4%" end labels
+  const W = rect.width, H = rect.height, AX = Math.max(96, fontPx() * 9.5), AY = 26;
+  ctx.clearRect(0, 0, W, H);
+
+  const data = [];
+  for (const s of syms) {
+    const sr = series[s];
+    if (!sr) continue;
+    const c = sr.c.slice(-days), t = sr.t.slice(-days);
+    if (c.length < 2) continue;
+    const base = c[0];
+    data.push({ s, t, pct: c.map((v) => (v / base - 1) * 100) });
+  }
+  if (!data.length) return;
+
+  let lo = Infinity, hi = -Infinity;
+  for (const d of data) for (const v of d.pct) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  const pad = (hi - lo) * 0.06 || 1; lo -= pad; hi += pad;
+  const n = Math.max(...data.map((d) => d.pct.length));
+  const x = (i, len) => ((i + (n - len)) / (n - 1)) * (W - AX);
+  const y = (v) => (1 - (v - lo) / (hi - lo)) * (H - AY);
+
+  // grid + axis
+  ctx.font = `${fontPx()}px Segoe UI`;
+  ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  const steps = Math.max(3, Math.floor((H - AY) / 50));
+  for (let i = 0; i <= steps; i++) {
+    const v = lo + ((hi - lo) * i) / steps;
+    const yy = Math.min(Math.max(y(v), 9), H - AY - 4); // keep labels inside the pane
+    ctx.strokeStyle = "#eef1f5"; ctx.setLineDash([2, 3]);
+    ctx.beginPath(); ctx.moveTo(0, y(v)); ctx.lineTo(W - AX, y(v)); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = v >= 0 ? "#0a8f3c" : "#e03131";
+    ctx.fillText((v > 0 ? "+" : "") + v.toFixed(1) + "%", W - AX + 6, yy);
+  }
+  // zero line
+  ctx.strokeStyle = "#b9c1cc";
+  ctx.beginPath(); ctx.moveTo(0, y(0)); ctx.lineTo(W - AX, y(0)); ctx.stroke();
+
+  // date labels
+  const d0 = data[0];
+  ctx.fillStyle = "#6b7480"; ctx.textAlign = "center"; ctx.textBaseline = "top";
+  for (let f = 0; f <= 4; f++) {
+    const i = Math.round(((d0.t.length - 1) * f) / 4);
+    const dt = new Date(d0.t[i] * 1000);
+    const lx = Math.min(Math.max(x(i, d0.pct.length), 44), W - AX - 44); // no edge clipping
+    ctx.fillText(dt.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "2-digit" }),
+      lx, H - AY + 6);
+  }
+
+  // series lines + end labels
+  data.forEach((d, di) => {
+    ctx.strokeStyle = COLORS[syms.indexOf(d.s) % COLORS.length];
+    ctx.lineWidth = 2; ctx.lineJoin = "round";
+    ctx.beginPath();
+    d.pct.forEach((v, i) => (i ? ctx.lineTo(x(i, d.pct.length), y(v)) : ctx.moveTo(x(i, d.pct.length), y(v))));
+    ctx.stroke();
+    const last = d.pct[d.pct.length - 1];
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.font = `bold ${fontPx()}px Segoe UI`;
+    ctx.textAlign = "left"; ctx.textBaseline = "middle";
+    ctx.fillText(`${d.s} ${(last > 0 ? "+" : "")}${last.toFixed(1)}%`, W - AX + 6, Math.min(Math.max(y(last), 8), H - AY - 8) - 14);
+  });
+}
+
+document.getElementById("addBtn").onclick = add;
+document.getElementById("symInput").onkeydown = (e) => e.key === "Enter" && add();
+function add() {
+  const s = document.getElementById("symInput").value.trim().toUpperCase();
+  if (s && !syms.includes(s) && syms.length < 8) { syms.push(s); document.getElementById("symInput").value = ""; load(); }
+}
+for (const b of document.querySelectorAll("#ranges button")) {
+  b.onclick = () => {
+    days = Number(b.dataset.d);
+    document.querySelectorAll("#ranges button").forEach((x) => x.classList.toggle("active", x === b));
+    draw();
+  };
+}
+new ResizeObserver(draw).observe(document.getElementById("wrap"));
+load();
+</script>
+</body>
+</html>

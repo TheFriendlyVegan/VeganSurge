@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VeganSurge</title>
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="logo">Vegan<span>Surge</span></div>
+
+  <div id="searchBox">
+    <input id="searchInput" type="text" placeholder="Symbol or company…" autocomplete="off" spellcheck="false">
+    <div id="searchResults" class="hidden"></div>
+  </div>
+
+  <div id="tfButtons" class="btn-group">
+    <button data-tf="d" class="active">Daily</button>
+    <button data-tf="w">Weekly</button>
+    <button data-tf="m">Monthly</button>
+  </div>
+
+  <div class="btn-group" id="intradayGroup">
+    <select id="intradaySelect" title="Intraday timeframe">
+      <option value="i1">1 Min</option>
+      <option value="i5">5 Min</option>
+      <option value="i10" selected>10 Min</option>
+      <option value="i15">15 Min</option>
+      <option value="i60">60 Min</option>
+    </select>
+  </div>
+
+  <div class="btn-group" id="dayNav">
+    <button id="dayPrev" title="Previous session">‹</button>
+    <input type="date" id="daySelect" title="Replay a specific day (intraday)">
+    <button id="dayNext" title="Next session">›</button>
+  </div>
+
+  <div class="btn-group">
+    <button id="logToggle" class="active" title="Logarithmic price scale">Log</button>
+  </div>
+
+  <div class="spacer"></div>
+
+  <div class="btn-group" id="utilButtons">
+    <button id="pipBtn" title="Open chart in a separate window">⧉</button>
+    <button id="shotBtn" title="Download chart screenshot">⤓</button>
+    <button id="resetBtn" title="Reset view to defaults">⟲</button>
+  </div>
+
+  <div id="liveStatus"><span class="dot"></span><span id="liveText">—</span></div>
+</header>
+
+<div id="companyBar">
+  <div class="cb-left">
+    <div class="cb-title">
+      <span id="qhSymbol">—</span>
+      <span id="qhName"></span>
+    </div>
+    <div class="cb-sub">
+      <span id="qhIndustry"></span>
+      <button id="alertBtn">🔔 Set Alert</button>
+      <div id="listAddWrap">
+        <button id="listAddBtn">＋ Add to List ▾</button>
+        <div id="listAddPop" class="pop hidden"></div>
+      </div>
+    </div>
+  </div>
+  <div class="cb-blurb">
+    <span id="qhSummary"></span>
+    <a id="qhWebsite" target="_blank" rel="noopener"></a>
+  </div>
+  <div class="cb-stats" id="qhStats"></div>
+  <div class="cb-price">
+    <div id="qhPrice">—</div>
+    <div id="qhChange"></div>
+    <div id="qhVolume"></div>
+  </div>
+</div>
+
+<div id="alertPop" class="pop hidden">
+  <div class="pop-title">Price alerts — <span id="alertSym"></span></div>
+  <div class="pop-row">
+    <input id="alertPrice" type="number" step="0.01" placeholder="Price level">
+    <button id="alertAdd">Add</button>
+  </div>
+  <div id="alertList"></div>
+  <div class="pop-note">Fires when price crosses the level (checked every few seconds while open).</div>
+</div>
+
+<main>
+  <aside id="watchlistPanel">
+    <div class="panel-head">
+      <select id="listSelect" title="Watchlist"></select>
+      <span class="panel-head-btns">
+        <button id="listNew" title="New list">＋</button>
+        <button id="listDel" title="Delete list">🗑</button>
+      </span>
+    </div>
+    <div id="watchlist"></div>
+    <div class="panel-foot"><button id="wlAdd">+ Add current symbol</button></div>
+  </aside>
+
+  <section id="chartSection">
+    <div id="replayBanner" class="hidden"></div>
+    <div id="chartWrap">
+      <canvas id="chart"></canvas>
+      <canvas id="markup"></canvas>
+      <canvas id="overlay"></canvas>
+      <div id="floatPanel" class="hidden">
+        <button id="fpToggle" title="Collapse panel">‹</button>
+        <div id="fpBody"></div>
+      </div>
+      <div id="toolsBar"></div>
+      <div id="chartMsg" class="hidden"></div>
+      <div id="toast" class="hidden"></div>
+    </div>
+    <div class="hint">scroll = zoom &nbsp;·&nbsp; drag = pan &nbsp;·&nbsp; double-click = reset &nbsp;·&nbsp; ↑/↓ = watchlist &nbsp;·&nbsp; D W M I = timeframe &nbsp;·&nbsp; L = log</div>
+  </section>
+</main>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

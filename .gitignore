@@ -1,0 +1,12 @@
+# MarketSurge screenshots (IBD copyrighted material — do not publish)
+chart examples/
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+build/
+dist/
+*.spec
+shot*.png
+*.log
