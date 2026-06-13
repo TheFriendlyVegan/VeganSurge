@@ -5,9 +5,10 @@
 // quarterly footer grid, pattern overlays, alert lines, track-price box.
 
 import { sma, rsLine } from "./indicators.js";
+import { aggregateWeekly, detectBases } from "./bases.js";
 import { fmtPrice, fmtNum, fmtDate, fmtDateTime, fmtPct } from "./fmt.js";
 
-const COLORS = {
+const LIGHT = {
   up: "#2534e9",        // MS blue
   down: "#df38b0",      // MS magenta
   gridDot: "#dcdcdc",   // dotted minor gridlines
@@ -27,6 +28,9 @@ const COLORS = {
   crosshair: "#5b6470",
   pivot: "#454545",
   pattern: "#2f7d32",
+  baseFill: "rgba(47,125,50,0.07)",
+  baseFaint: "rgba(47,125,50,0.28)",
+  breakout: "rgba(2,125,66,0.75)",
   alert: "#027d42",
   bb: "#7048e8",
   ema: "#0c8599",
@@ -35,7 +39,53 @@ const COLORS = {
   footerZebra: "#f0f1f1",
   footerHeaderFY: "#0073a2",
   footerCurrentSep: "#4b5969",
+  labelBg: "rgba(255,255,255,0.85)",
+  cardBg: "rgba(255,255,255,0.97)",
+  cardBorder: "#d4dae1",
+  extHours: "rgba(108,120,140,0.08)",
+  shotBg: "#ffffff",
 };
+
+// Night mode: dark slate, brighter accents tuned to match the day palette's vibe.
+const DARK = {
+  up: "#4d9bff",        // brighter blue for dark bg
+  down: "#ff5cc8",      // brighter magenta
+  gridDot: "#252b34",
+  gridSolid: "#2c333d",
+  gridQtr: "#3a424e",
+  gridStrong: "#39424e",
+  axis: "#8b97a6",
+  text: "#e6ebf2",
+  rs: "#6ea8ff",
+  rsLabel: "#8aa0ff",
+  spx: "#c3ccd8",
+  avgVol: "#ff7a5c",
+  pos: "#3fcf6b",
+  neg: "#ff6b6b",
+  earnArrow: "#aeb8c6",
+  earnCaption: "#8b97a6",
+  crosshair: "#9aa6b4",
+  pivot: "#aeb8c6",
+  pattern: "#36d07f",
+  baseFill: "rgba(54,208,127,0.08)",
+  baseFaint: "rgba(54,208,127,0.3)",
+  breakout: "rgba(54,208,127,0.8)",
+  alert: "#36d07f",
+  bb: "#a98bff",
+  ema: "#3bc9db",
+  vwap: "#ff924d",
+  footerSep: "#3a424e",
+  footerZebra: "#1a212b",
+  footerHeaderFY: "#4db8e6",
+  footerCurrentSep: "#6b7888",
+  labelBg: "rgba(18,23,30,0.85)",
+  cardBg: "rgba(22,28,37,0.97)",
+  cardBorder: "#39424e",
+  extHours: "rgba(150,165,190,0.07)",
+  shotBg: "#11161d",
+};
+
+let COLORS = LIGHT;
 
 const MA_STYLES = {
   d: [
@@ -81,10 +131,11 @@ export class Chart {
       rs: true,
       volAvg: true,
       mas: true,
-      patterns: false,
+      patterns: true,
       tightAreas: false,
       pivotZones: true,
       rsDots: true,
+      prepost: false,
     };
     this.studies = { ema21: false, bb: false, vwap: false };
     this.afterRender = null;
@@ -139,6 +190,31 @@ export class Chart {
     this.quarters = (this.financials?.quarterly || []).filter(
       (q) => q.t >= b.t[0] && (q.eps != null || q.sales != null)
     );
+    // flag bars outside the 9:30–16:00 ET regular session (extended hours)
+    this.extHours = null;
+    if (this.isIntraday && data.prepost) {
+      const fmt = new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/New_York", hour12: false, hour: "numeric", minute: "numeric",
+      });
+      this.extHours = new Uint8Array(this.n);
+      for (let i = 0; i < this.n; i++) {
+        const parts = fmt.formatToParts(new Date(b.t[i] * 1000));
+        let hh = 0, mm = 0;
+        for (const p of parts) {
+          if (p.type === "hour") hh = +p.value;
+          else if (p.type === "minute") mm = +p.value;
+        }
+        const mins = (hh % 24) * 60 + mm;
+        if (mins < 570 || mins >= 960) this.extHours[i] = 1;
+      }
+    }
+
+    // IBD base detection on weekly structure (daily gets aggregated)
+    this.bases = [];
+    try {
+      if (this.tf === "d") this.bases = detectBases(aggregateWeekly(this.bars));
+      else if (this.tf === "w") this.bases = detectBases(this.bars);
+    } catch {}
     this.computeStudies();
     this._layout();
     if (prior) {
@@ -241,6 +317,11 @@ export class Chart {
     this.requestRender();
   }
 
+  setTheme(night) {
+    COLORS = night ? DARK : LIGHT;
+    this.requestRender();
+  }
+
   updateLastBar(q) {
     if (!this.bars || !this.n || this.dayMode) return;
     const i = this.n - 1;
@@ -248,6 +329,10 @@ export class Chart {
     this.bars.c[i] = q.last;
     if (q.dayHigh != null) this.bars.h[i] = Math.max(this.bars.h[i], q.dayHigh);
     if (q.dayLow != null) this.bars.l[i] = Math.min(this.bars.l[i], q.dayLow);
+    // the live close must stay inside the bar's range, or the wick/close marker
+    // renders above the high (or below the low) on a fast intraday move
+    this.bars.h[i] = Math.max(this.bars.h[i], q.last);
+    this.bars.l[i] = Math.min(this.bars.l[i], q.last);
     if (q.volume != null) this.bars.v[i] = q.volume;
     for (const ma of this.mas) {
       if (i >= ma.period - 1) {
@@ -329,22 +414,19 @@ export class Chart {
 
   _computeScales() {
     const [i0, i1] = this._visibleRange();
+    const mas = this.flags.mas ? this.mas : []; // fold MA extents into one pass
     let lo = Infinity, hi = -Infinity, vmax = 0, vmin = Infinity;
     for (let i = i0; i <= i1; i++) {
       if (this.bars.l[i] < lo) lo = this.bars.l[i];
       if (this.bars.h[i] > hi) hi = this.bars.h[i];
       if (this.bars.v[i] > vmax) vmax = this.bars.v[i];
       if (this.bars.v[i] > 0 && this.bars.v[i] < vmin) vmin = this.bars.v[i];
-    }
-    this.vLo = isFinite(vmin) ? Math.max(vmin * 0.7, vmax / 40) : vmax / 25;
-    if (this.flags.mas) {
-      for (const ma of this.mas) {
-        for (let i = i0; i <= i1; i++) {
-          const v = ma.values[i];
-          if (v != null) { if (v < lo) lo = v; if (v > hi) hi = v; }
-        }
+      for (const ma of mas) {
+        const v = ma.values[i];
+        if (v != null) { if (v < lo) lo = v; if (v > hi) hi = v; }
       }
     }
+    this.vLo = isFinite(vmin) ? Math.max(vmin * 0.7, vmax / 40) : vmax / 25;
     if (!isFinite(lo) || !isFinite(hi) || lo <= 0) { lo = 1; hi = 2; }
     if (hi === lo) { hi *= 1.05; lo *= 0.95; }
 
@@ -359,29 +441,20 @@ export class Chart {
     }
     this.vMax = vmax || 1;
 
-    this.rsScale = null;
-    if (this.rs && this.flags.rs) {
-      let rlo = Infinity, rhi = -Infinity;
-      for (let i = i0; i <= i1; i++) {
-        const r = this.rs[i];
-        if (r != null) { if (r < rlo) rlo = r; if (r > rhi) rhi = r; }
-      }
-      if (isFinite(rlo) && rlo > 0 && rhi > rlo) {
-        this.rsScale = { lo: Math.log(rlo), hi: Math.log(rhi) };
-      }
-    }
+    // RS/SPX scales are computed lazily in their own (safe-wrapped) draw
+    // functions so a price-scale edge case can't suppress those overlays.
+  }
 
-    this.spxScale = null;
-    if (this.bench && this.flags.spx && !this.isIntraday) {
-      let blo = Infinity, bhi = -Infinity;
-      for (let i = i0; i <= i1; i++) {
-        const b = this.bench[i];
-        if (b != null) { if (b < blo) blo = b; if (b > bhi) bhi = b; }
-      }
-      if (isFinite(blo) && blo > 0 && bhi > blo) {
-        this.spxScale = { lo: Math.log(blo), hi: Math.log(bhi) };
-      }
+  // log-scaled min/max of a series over the visible range, or null
+  _seriesScale(series) {
+    if (!series) return null;
+    const [i0, i1] = this._visibleRange();
+    let lo = Infinity, hi = -Infinity;
+    for (let i = i0; i <= i1; i++) {
+      const v = series[i];
+      if (v != null) { if (v < lo) lo = v; if (v > hi) hi = v; }
     }
+    return isFinite(lo) && lo > 0 && hi > lo ? { lo: Math.log(lo), hi: Math.log(hi) } : null;
   }
 
   priceToY(p) {
@@ -428,6 +501,18 @@ export class Chart {
 
   // ---------- rendering ----------
 
+  _safe(name, fn) {
+    try {
+      fn();
+    } catch (e) {
+      if (!this._warned) this._warned = {};
+      if (!this._warned[name]) {
+        this._warned[name] = 1;
+        console.error(`VeganSurge: ${name} draw failed`, e);
+      }
+    }
+  }
+
   requestRender() {
     if (this._raf) return;
     this._raf = requestAnimationFrame(() => {
@@ -436,28 +521,63 @@ export class Chart {
     });
   }
 
+  // Crosshair/track redraw on its own rAF so rapid pointermove events coalesce
+  // into at most one overlay redraw per frame (the overlay redraw measures text
+  // for the hover cards, so unthrottled it can fire well above 60fps).
+  requestCrosshair() {
+    if (this._chRaf) return;
+    this._chRaf = requestAnimationFrame(() => {
+      this._chRaf = 0;
+      this._safe("crosshair", () => this._drawCrosshair());
+    });
+  }
+
   render() {
+    try {
+      this._render();
+    } catch (e) {
+      console.error("VeganSurge: render failed", e);
+    }
+  }
+
+  _render() {
     const ctx = this.ctx;
     ctx.clearRect(0, 0, this.w, this.h);
     if (!this.bars || !this.n) return;
 
-    this._computeScales();
-    this._drawGrid(ctx);
-    this._drawTimeAxis(ctx);
-    this._drawPriceAxis(ctx);
-    this._drawPatterns(ctx);
-    this._drawVolume(ctx);
-    this._drawSpx(ctx);
-    this._drawRS(ctx);
-    if (this.flags.mas) this._drawMAs(ctx);
-    this._drawStudies(ctx);
-    this._drawBars(ctx);
-    if (this.flags.pivots) this._drawPivots(ctx);
-    if (this.flags.earnings) this._drawEarningsFlags(ctx);
-    this._drawFooter(ctx);
-    if (this.flags.alerts) this._drawAlertLines(ctx);
-    this._drawLegend(ctx);
-    this._drawCrosshair();
+    this._safe("scales", () => this._computeScales());
+    // fallback scale if _computeScales failed, so bars still draw
+    if (!isFinite(this.pLo) || !isFinite(this.pHi) || this.pHi <= this.pLo) {
+      const [i0, i1] = this._visibleRange();
+      let lo = Infinity, hi = -Infinity;
+      for (let i = i0; i <= i1; i++) {
+        if (this.bars.l[i] < lo) lo = this.bars.l[i];
+        if (this.bars.h[i] > hi) hi = this.bars.h[i];
+      }
+      if (!isFinite(lo) || lo <= 0) { lo = 1; hi = 2; }
+      this.pLo = this.log ? Math.log(lo) : lo;
+      this.pHi = this.log ? Math.log(hi) : hi;
+      this.vMax = this.vMax || 1;
+    }
+    // every stage is isolated so one bad data edge case can never blank the
+    // whole canvas — at worst a single overlay is missing
+    this._safe("grid", () => this._drawGrid(ctx));
+    this._safe("extHours", () => this._drawExtHours(ctx));
+    this._safe("timeAxis", () => this._drawTimeAxis(ctx));
+    this._safe("priceAxis", () => this._drawPriceAxis(ctx));
+    this._safe("patterns", () => this._drawPatterns(ctx));
+    this._safe("volume", () => this._drawVolume(ctx));
+    this._safe("spx", () => this._drawSpx(ctx));
+    this._safe("rs", () => this._drawRS(ctx));
+    if (this.flags.mas) this._safe("mas", () => this._drawMAs(ctx));
+    this._safe("studies", () => this._drawStudies(ctx));
+    this._safe("bars", () => this._drawBars(ctx));
+    if (this.flags.pivots) this._safe("pivots", () => this._drawPivots(ctx));
+    if (this.flags.earnings) this._safe("earnings", () => this._drawEarningsFlags(ctx));
+    this._safe("footer", () => this._drawFooter(ctx));
+    if (this.flags.alerts) this._safe("alerts", () => this._drawAlertLines(ctx));
+    this._safe("legend", () => this._drawLegend(ctx));
+    this._safe("crosshair", () => this._drawCrosshair());
     this.afterRender?.();
   }
 
@@ -467,6 +587,29 @@ export class Chart {
     ctx.lineWidth = 1;
     ctx.strokeRect(0.5, p.y + 0.5, p.w, p.h);
     ctx.strokeRect(0.5, this.volPane.y + 0.5, this.volPane.w, this.volPane.h);
+  }
+
+  // light shading over pre-market / after-hours bars
+  _drawExtHours(ctx) {
+    if (!this.extHours) return;
+    const [i0, i1] = this._visibleRange();
+    const bw = this.barWidth();
+    ctx.fillStyle = COLORS.extHours;
+    let runStart = -1;
+    const flush = (a, b) => {
+      const x0 = this.indexToX(a) - bw / 2;
+      const x1 = this.indexToX(b) + bw / 2;
+      ctx.fillRect(x0, this.pricePane.y, x1 - x0, this.dateAxisY - this.pricePane.y);
+    };
+    for (let i = i0; i <= i1; i++) {
+      if (this.extHours[i]) {
+        if (runStart === -1) runStart = i;
+      } else if (runStart !== -1) {
+        flush(runStart, i - 1);
+        runStart = -1;
+      }
+    }
+    if (runStart !== -1) flush(runStart, i1);
   }
 
   _priceTicks() {
@@ -692,6 +835,7 @@ export class Chart {
   }
 
   _drawSpx(ctx) {
+    this.spxScale = this.flags.spx && !this.isIntraday ? this._seriesScale(this.bench) : null;
     if (!this.spxScale) return;
     this._drawLine(ctx, this.bench, COLORS.spx, 1.1, (v) => this.spxToY(v));
     // label ~15% in from the right and below the line, clear of the tools bar
@@ -710,6 +854,7 @@ export class Chart {
   }
 
   _drawRS(ctx) {
+    this.rsScale = this.flags.rs ? this._seriesScale(this.rs) : null;
     if (!this.rs || !this.rsScale) return;
     this._drawLine(ctx, this.rs, COLORS.rs, 1.5, (v) => this.rsToY(v));
 
@@ -936,9 +1081,8 @@ export class Chart {
     if (this.isIntraday || !this.n) return;
     const [i0, i1] = this._visibleRange();
     const showPivotZones = this.flags.pivotZones || this.flags.patterns;
-    const showTight = this.flags.tightAreas || this.flags.patterns;
 
-    if (showTight) {
+    if (this.flags.tightAreas) { // explicit toggle only — too coarse for "All Patterns"
       const minRun = this.tf === "w" ? 3 : 5;
       const tol = 0.015;
       let runStart = -1;
@@ -972,42 +1116,270 @@ export class Chart {
       shade(runStart, i1);
     }
 
+    // ---- current base + its pivot/breakout ----
+    // MarketSurge highlights only the single most-recent (actionable) base,
+    // not every historical structure — so we draw just one.
+    const lastClose = this.bars.c[this.n - 1];
+    // Show only the most-recently identified base. MarketSurge keeps a
+    // historical/extended base on the chart (it doesn't vanish once price runs
+    // past the buy point) — it just never shows more than the latest one.
+    const target = (this.bases || []).slice(-1)[0];
+
+    this._baseHits = []; // hover hit-regions, rebuilt each render
+    if (this.flags.patterns && target) {
+      const xs = this.indexToX(this._indexOfTime(target.t0));
+      const xe = this.indexToX(this._indexOfTime(target.tEnd));
+      if (!(xe < 0 || xs > this.pricePane.w)) this._drawBaseArc(ctx, target, true);
+    }
+
     if (showPivotZones) {
-      // most recent significant pivot high -> dashed buy-point line to the
-      // right edge. Only a *current* base counts: recent bars, near price.
-      const w = Math.max(5, Math.round((i1 - i0) * 0.04));
-      const recency = { d: 140, w: 65, m: 24 }[this.tf] || 140;
-      const lastClose = this.bars.c[this.n - 1];
-      const searchLo = Math.max(Math.max(i0, w), this.n - 1 - recency);
-      let pivotIdx = -1;
-      for (let i = Math.min(i1, this.n - 1 - w); i >= searchLo; i--) {
-        const hv = this.bars.h[i];
-        let ok = true;
-        for (let k = i - w; k <= i + w && ok; k++) {
-          if (k !== i && this.bars.h[k] >= hv) ok = false;
+      if (target) {
+        this._drawPivotZone(ctx, target, i0, i1);
+      } else {
+        // fallback: most recent significant swing high (no base card)
+        const w = Math.max(5, Math.round((i1 - i0) * 0.04));
+        const recency = { d: 140, w: 65, m: 24 }[this.tf] || 140;
+        const searchLo = Math.max(Math.max(i0, w), this.n - 1 - recency);
+        for (let i = Math.min(i1, this.n - 1 - w); i >= searchLo; i--) {
+          const hv = this.bars.h[i];
+          let ok = true;
+          for (let k = i - w; k <= i + w && ok; k++) {
+            if (k !== i && this.bars.h[k] >= hv) ok = false;
+          }
+          if (ok && hv >= lastClose * 0.7) {
+            this._pivotLine(ctx, hv, this.indexToX(i), this.pricePane.w, `pivot ${fmtPrice(hv)}`);
+            break;
+          }
         }
-        if (ok) { pivotIdx = i; break; }
-      }
-      if (pivotIdx >= 0 && this.bars.h[pivotIdx] < lastClose * 0.7) pivotIdx = -1; // stale base
-      if (pivotIdx >= 0) {
-        const price = this.bars.h[pivotIdx];
-        const y = this.priceToY(price);
-        const x0 = this.indexToX(pivotIdx);
-        ctx.strokeStyle = COLORS.pattern;
-        ctx.setLineDash([5, 4]);
-        ctx.lineWidth = 1.2;
-        ctx.beginPath();
-        ctx.moveTo(x0, y);
-        ctx.lineTo(this.pricePane.w, y);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.font = this.font(10.5, "bold");
-        ctx.fillStyle = COLORS.pattern;
-        ctx.textAlign = "left";
-        ctx.textBaseline = "bottom";
-        ctx.fillText(fmtPrice(price) + " pivot", Math.max(x0 + 6, this.pricePane.w - this.px(10) * 9), y - 3);
       }
     }
+  }
+
+  _breakoutIndex(b) {
+    for (let i = this._indexOfTime(b.tEnd) + 1; i < this.n; i++) {
+      if (this.bars.c[i] > b.pivot) return i;
+    }
+    return -1;
+  }
+
+  // Idealized base outline. Flat bases are drawn as a box (the dashed pivot
+  // line on top is added by _drawPivotZone; here we add the solid support line
+  // at the base low). Cups get a clean parabolic U through the left rim, the
+  // low, and the RIGHT RIM (not the handle end — that would stretch the curve).
+  // Also records the hover hit-region so the info cards appear on mouseover.
+  _drawBaseArc(ctx, b, prominent) {
+    const iL = this._indexOfTime(b.t0);
+    const iLow = this._indexOfTime(b.tLow);
+    const iR = this._indexOfTime(b.tRight ?? b.tEnd); // right lip of the cup
+    if (iR <= iL) return;
+    const x0 = this.indexToX(iL), xLow = this.indexToX(iLow), xR = this.indexToX(iR);
+    const yL = this.priceToY(b.hLeft), yLow = this.priceToY(b.low);
+    const yR = this.priceToY(b.right ?? b.hLeft);
+
+    this._baseHits.push({
+      base: b,
+      bi: this._breakoutIndex(b),
+      stage: this.bases.indexOf(b) + 1,
+      x0,
+      x1: this.indexToX(this._indexOfTime(b.tEnd)),
+      yTop: Math.min(yL, yR) - 8,
+      yBot: yLow + 10,
+    });
+
+    ctx.save();
+    ctx.strokeStyle = COLORS.pattern;
+    ctx.lineWidth = 2.2;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.shadowColor = "rgba(2,125,66,0.22)";
+    ctx.shadowBlur = 4;
+    ctx.beginPath();
+    if (b.type === "Flat Base") {
+      // solid support line along the floor of the box (left lip -> right lip)
+      const y = Math.round(this.priceToY(b.low)) + 0.5;
+      ctx.moveTo(x0, y);
+      ctx.lineTo(xR, y);
+    } else {
+      // smooth cup: two parabolic halves meeting at the low with a horizontal
+      // tangent — a rounded bottom that passes through left rim / low / right
+      // rim exactly and never undershoots (a single Lagrange parabola would
+      // dip below the real low when the low isn't horizontally centered).
+      const N = 30;
+      for (let s = 0; s <= N; s++) { // left half: rim -> low
+        const u = s / N;
+        const x = x0 + (xLow - x0) * u;
+        const y = yLow + (yL - yLow) * (1 - u) * (1 - u);
+        s === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      }
+      for (let s = 1; s <= N; s++) { // right half: low -> rim
+        const u = s / N;
+        const x = xLow + (xR - xLow) * u;
+        const y = yLow + (yR - yLow) * u * u;
+        ctx.lineTo(x, y);
+      }
+      // cup-with-handle: continue the same stroke with a straight handle line
+      // from the right rim down to the handle low (sized across the handle
+      // sessions). This is what visually distinguishes a CnH from a plain cup.
+      if (b.type === "Cup w/ Handle" && b.tHandleLow != null) {
+        const xH = this.indexToX(this._indexOfTime(b.tHandleLow));
+        const yH = this.priceToY(b.handleLow);
+        ctx.lineTo(xH, yH);
+      }
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Dashed horizontal pivot (buy-point) line; label optional.
+  _pivotLine(ctx, pivot, x0, x1, label) {
+    const y = this.priceToY(pivot);
+    if (y < this.pricePane.y || y > this.pricePane.y + this.pricePane.h) return;
+    ctx.strokeStyle = COLORS.pattern;
+    ctx.setLineDash([6, 4]);
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(x0, Math.round(y) + 0.5);
+    ctx.lineTo(x1, Math.round(y) + 0.5);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    if (!label) return;
+    ctx.font = this.font(10.5, "bold");
+    const nearTop = y < this.pricePane.y + this.px(11) * 6;
+    const tw = ctx.measureText(label).width;
+    const lx = Math.min(x1, this.pricePane.w) - 4;
+    ctx.fillStyle = COLORS.labelBg;
+    ctx.fillRect(lx - tw - 6, nearTop ? y + 3 : y - this.px(11) - 6, tw + 8, this.px(11) + 4);
+    ctx.fillStyle = COLORS.pattern;
+    ctx.textAlign = "right";
+    ctx.textBaseline = nearTop ? "top" : "bottom";
+    ctx.fillText(label, lx, nearTop ? y + 4 : y - 3);
+  }
+
+  // Live pivot line (clipped to the breakout candle) + breakout marker.
+  // The info cards are NOT drawn here — they appear on hover (_drawBaseHover).
+  _drawPivotZone(ctx, base, i0, i1) {
+    const x0 = this.indexToX(this._indexOfTime(base.t0));
+    const bi = this._breakoutIndex(base);
+    const x1 = bi >= 0 ? this.indexToX(bi) : this.indexToX(this.n - 1);
+    this._pivotLine(ctx, base.pivot, x0, x1, null);
+    if (bi >= 0 && bi >= i0 - 2 && bi <= i1 + 2) this._drawBreakoutMark(ctx, base, bi);
+  }
+
+  // Green ▲ just beneath the breakout candle, joined to the candle by a short
+  // dashed connector. The marker floats under the candle (a legible gap below
+  // its low) rather than being pinned to the x-axis; the dashed line spans only
+  // from the start (low) of the breakout candle down to the arrow.
+  _drawBreakoutMark(ctx, base, bi) {
+    const x = Math.round(this.indexToX(bi)) + 0.5;
+    const candleLowY = this.priceToY(this.bars.l[bi]); // start (bottom) of the candle
+    const s = this.fontScale * 7;
+    const arrowTipY = candleLowY + s;        // ▲ tip, a small gap below the candle
+    const arrowBaseY = arrowTipY + s * 1.5;
+    // dashed connector: candle low -> arrow
+    ctx.strokeStyle = COLORS.breakout;
+    ctx.setLineDash([4, 4]);
+    ctx.lineWidth = 1.3;
+    ctx.beginPath();
+    ctx.moveTo(x, candleLowY);
+    ctx.lineTo(x, arrowTipY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // green ▲ pointing up at the breakout candle
+    ctx.save();
+    ctx.shadowColor = "rgba(2,125,66,0.3)";
+    ctx.shadowBlur = 3;
+    ctx.fillStyle = COLORS.pattern;
+    ctx.beginPath();
+    ctx.moveTo(x, arrowTipY);
+    ctx.lineTo(x - s, arrowBaseY);
+    ctx.lineTo(x + s, arrowBaseY);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Hover cards: shown only when the cursor is over a detected base. Two
+  // opaque floating cards — base stats (teal title) and Breakout Day stats.
+  _drawBaseHover(ctx) {
+    if (!this.mouse || !this._baseHits?.length) return;
+    const { x, y } = this.mouse;
+    const hit = this._baseHits.find(
+      (h) => x >= h.x0 - 4 && x <= h.x1 + 4 && y >= h.yTop && y <= h.yBot
+    );
+    if (!hit) return;
+    const b = hit.base;
+    const days = Math.round((b.tEnd - b.t0) / 86400);
+    const baseRows = [
+      ["Stage", String(hit.stage)],
+      ["Pivot", "$" + fmtPrice(b.pivot)],
+      ["Length", days + " days"],
+      ["Depth", b.depth + "%"],
+    ];
+    if (b.handlePct != null) baseRows.push(["Handle", b.handlePct + "%"]);
+    const anchorX = (hit.bi >= 0 ? this.indexToX(hit.bi) : hit.x1) + 12;
+    const top = this.pricePane.y + this.px(10) * 2;
+    const c1 = this._hoverCard(ctx, anchorX, top, b.type, COLORS.footerHeaderFY, "center", baseRows);
+    if (hit.bi >= 0) {
+      const prev = hit.bi > 0 ? this.bars.c[hit.bi - 1] : this.bars.o[hit.bi];
+      const pricePct = prev ? ((this.bars.c[hit.bi] - prev) / prev) * 100 : 0;
+      const va = this.volAvg?.[hit.bi];
+      const volPct = va ? (this.bars.v[hit.bi] / va - 1) * 100 : null;
+      const boRows = [
+        ["Price %", fmtPct(pricePct), pricePct >= 0 ? COLORS.pos : COLORS.neg],
+        ["Vol %", volPct != null ? fmtPct(volPct) : "—", volPct != null && volPct >= 0 ? COLORS.pos : COLORS.neg],
+      ];
+      this._hoverCard(ctx, c1.bx, c1.by + c1.h + 8, "Breakout Day", COLORS.text, "left", boRows);
+    }
+  }
+
+  // Opaque rounded card with a title row and label-left / value-right rows.
+  _hoverCard(ctx, x, y, title, titleColor, titleAlign, rows) {
+    const fs = this.px(11);
+    const rowH = fs + 7;
+    ctx.font = this.font(11, "bold");
+    let maxW = ctx.measureText(title).width;
+    for (const [l, v] of rows) {
+      ctx.font = this.font(10.5);
+      const lw = ctx.measureText(l).width;
+      ctx.font = this.font(10.5, "bold");
+      const vw = ctx.measureText(v).width;
+      if (lw + vw + 28 > maxW) maxW = lw + vw + 28;
+    }
+    const w = maxW + 20;
+    const h = rowH * (rows.length + 1) + 12;
+    const bx = Math.max(2, Math.min(x, this.pricePane.w - w - 2));
+    const by = Math.max(this.pricePane.y + 2, Math.min(y, this.pricePane.y + this.pricePane.h - h - 2));
+    ctx.save();
+    ctx.shadowColor = "rgba(20,30,40,0.25)";
+    ctx.shadowBlur = 10;
+    ctx.shadowOffsetY = 2;
+    ctx.fillStyle = COLORS.cardBg;
+    ctx.beginPath();
+    ctx.roundRect(bx, by, w, h, 7);
+    ctx.fill();
+    ctx.restore();
+    ctx.strokeStyle = COLORS.cardBorder;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(bx, by, w, h, 7);
+    ctx.stroke();
+    ctx.textBaseline = "top";
+    ctx.font = this.font(11, "bold");
+    ctx.fillStyle = titleColor;
+    if (titleAlign === "center") { ctx.textAlign = "center"; ctx.fillText(title, bx + w / 2, by + 7); }
+    else { ctx.textAlign = "left"; ctx.fillText(title, bx + 10, by + 7); }
+    rows.forEach(([l, v, vc], k) => {
+      const ry = by + 7 + rowH * (k + 1);
+      ctx.font = this.font(10.5);
+      ctx.fillStyle = COLORS.axis;
+      ctx.textAlign = "left";
+      ctx.fillText(l, bx + 10, ry);
+      ctx.font = this.font(10.5, "bold");
+      ctx.fillStyle = vc || COLORS.text;
+      ctx.textAlign = "right";
+      ctx.fillText(v, bx + w - 10, ry);
+    });
+    return { bx, by, w, h };
   }
 
   _drawAlertLines(ctx) {
@@ -1057,6 +1429,13 @@ export class Chart {
     ctx.lineTo(this.w, y0 + 0.5);
     ctx.stroke();
 
+    // hard boundary between footer columns and the right-gutter legend
+    ctx.strokeStyle = COLORS.footerSep;
+    ctx.beginPath();
+    ctx.moveTo(Math.round(plotW) + 0.5, y0);
+    ctx.lineTo(Math.round(plotW) + 0.5, this.h);
+    ctx.stroke();
+
     // right-gutter row labels (bold, right-aligned like MS)
     ctx.font = this.font(9, "bold");
     ctx.fillStyle = COLORS.text;
@@ -1072,13 +1451,21 @@ export class Chart {
       : (p > 0 ? "+" : "") + Math.round(p) + "%";
 
     const qs = this.quarters;
-    const lastReported = qs.length ? qs[qs.length - 1] : null;
+    const lastReported = qs.filter((q) => !q.est).pop() || null;
+    const lastT = this.bars.t[this.n - 1];
+    // map a quarter-end timestamp to an x position, projecting future
+    // (estimate) quarters into the right margin past the last bar
+    const barsPerDay = { d: 5 / 7, w: 1 / 7, m: 1 / 30.4 }[this.tf] || 1;
+    const tToX = (ts) =>
+      ts <= lastT
+        ? this.indexToX(this._indexOfTime(ts))
+        : this.indexToX(this.n - 1 + ((ts - lastT) / 86400) * barsPerDay);
     for (let qi = 0; qi < qs.length; qi++) {
       const q = qs[qi];
-      if (q.t < t0 - 92 * 86400 || q.t > t1 + 200 * 86400) continue;
-      const xEnd = Math.min(this.indexToX(this._indexOfTime(q.t)), plotW);
+      if (q.t < t0 - 92 * 86400 || q.t > t1 + 320 * 86400) continue;
+      const xEnd = Math.min(tToX(q.t), plotW);
       const prevT = qi > 0 ? qs[qi - 1].t : q.t - 91 * 86400;
-      const xStart = Math.max(this.indexToX(this._indexOfTime(prevT)), 0);
+      const xStart = Math.max(tToX(prevT), 0);
       const cw = xEnd - xStart;
       if (cw < 24) continue;
 
@@ -1205,6 +1592,7 @@ export class Chart {
     } else {
       this._drawOhlcStrip(ctx, i);
     }
+    this._safe("baseHover", () => this._drawBaseHover(ctx));
   }
 
   _drawOhlcStrip(ctx, i) {
@@ -1220,7 +1608,7 @@ export class Chart {
     ctx.textBaseline = "top";
     let px = 8;
     const py = this.pricePane.y + this.px(11) * 2;
-    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    ctx.fillStyle = COLORS.labelBg;
     ctx.fillRect(4, py - 3, this.px(11) * 32, this.px(11) + 8);
     for (const [k, val] of parts) {
       ctx.fillStyle = COLORS.axis;
@@ -1271,8 +1659,8 @@ export class Chart {
     if (Y + H > this.dateAxisY - 4) Y = this.dateAxisY - H - 4;
     if (Y < 4) Y = 4;
 
-    ctx.fillStyle = "rgba(255,255,255,0.97)";
-    ctx.strokeStyle = "#d4dae1";
+    ctx.fillStyle = COLORS.cardBg;
+    ctx.strokeStyle = COLORS.cardBorder;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.roundRect(X, Y, W, H, 6);
@@ -1327,7 +1715,7 @@ export class Chart {
         this._clampView();
         this.requestRender();
       } else {
-        this._drawCrosshair();
+        this.requestCrosshair();
       }
     });
     el.addEventListener("pointerup", (e) => {

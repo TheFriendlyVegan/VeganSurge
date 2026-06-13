@@ -19,7 +19,7 @@ function toggleRow(label, key, on) {
   );
 }
 
-export function initTools(chart, state, { onCompare }) {
+export function initTools(chart, state, { onCompare, onReload }) {
   const bar = document.getElementById("toolsBar");
   const markup = new Markup(chart, document.getElementById("markup"));
 
@@ -33,7 +33,7 @@ export function initTools(chart, state, { onCompare }) {
   function savePrefs() {
     localStorage.setItem(
       "vs.toolprefs",
-      JSON.stringify({ flags: chart.flags, chartType: chart.chartType, studies: chart.studies })
+      JSON.stringify({ flags: chart.flags, chartType: chart.chartType, studies: chart.studies, collapsed })
     );
   }
 
@@ -89,8 +89,7 @@ export function initTools(chart, state, { onCompare }) {
   }
   btn("wrench").addEventListener("click", () => {
     collapsed = !collapsed;
-    prefs.collapsed = collapsed;
-    localStorage.setItem("vs.toolprefs", JSON.stringify({ ...JSON.parse(localStorage.getItem("vs.toolprefs") || "{}"), collapsed }));
+    savePrefs(); // persists collapsed alongside flags/chartType/studies
     applyCollapsed();
   });
 
@@ -144,7 +143,8 @@ export function initTools(chart, state, { onCompare }) {
 
   // ---------- compare ----------
   btn("compare").addEventListener("click", () => {
-    const recent = JSON.parse(localStorage.getItem("vs.recentSyms") || "[]");
+    let recent = [];
+    try { recent = JSON.parse(localStorage.getItem("vs.recentSyms")) || []; } catch {}
     showPop(
       "compare",
       `<div class="pop-title">Search and Compare</div>
@@ -258,6 +258,7 @@ export function initTools(chart, state, { onCompare }) {
         toggleRow("Earnings", "earnings", f.earnings) +
         toggleRow("Marked Highs & Lows", "pivots", f.pivots) +
         toggleRow("Volume Peaks", "volPeaks", f.volPeaks) +
+        toggleRow("Extended Hours (intraday)", "prepost", f.prepost) +
         `<div class="pop-title" style="margin-top:0.6rem">Volume Scale</div>` +
         toggleRow("Logarithmic Volume", "volLog", f.volLog)
     );
@@ -267,6 +268,7 @@ export function initTools(chart, state, { onCompare }) {
         chart.flags[key] = on;
         if (key === "dataBox") setOn("track", on);
         if (key === "footer") chart.resize();
+        if (key === "prepost") onReload?.();
       }
       chart.requestRender();
     });

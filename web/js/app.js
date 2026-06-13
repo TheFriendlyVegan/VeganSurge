@@ -67,7 +67,29 @@ function saveAlerts() {
 
 const chart = new Chart($("chart"), $("overlay"), $("markup"));
 chart.setLog(state.log);
-const tools = initTools(chart, state, { onCompare: openCompareWindow });
+const tools = initTools(chart, state, {
+  onCompare: openCompareWindow,
+  onReload: () => loadSymbol(state.symbol, { keepView: true }),
+});
+
+// ---------------- currency ----------------
+
+const CUR_SYM = {
+  USD: "$", EUR: "€", GBP: "£", GBp: "p", JPY: "¥", CNY: "¥", HKD: "HK$",
+  CAD: "C$", AUD: "A$", NZD: "NZ$", CHF: "Fr ", INR: "₹", KRW: "₩",
+  SEK: " kr", NOK: " kr", DKK: " kr", BRL: "R$", MXN: "Mex$", TWD: "NT$",
+  SGD: "S$", ILS: "₪", ZAR: "R ", PLN: " zł", TRY: "₺",
+};
+
+function money(v) {
+  if (v == null || !isFinite(v)) return "—";
+  const cur = state.quote?.currency || "USD";
+  const sym = CUR_SYM[cur] ?? cur + " ";
+  const num = fmtPrice(v);
+  if (cur === "GBp") return num + "p"; // London prices quote in pence
+  if (sym.startsWith(" ")) return num + sym; // suffix currencies (kr, zł)
+  return sym + num;
+}
 
 // ---------------- symbol loading ----------------
 
@@ -90,8 +112,9 @@ async function loadSymbol(symbol, { keepView = false } = {}) {
 
   try {
     const day = isIntraday() ? state.day : null;
+    const prepost = isIntraday() && chart.flags.prepost;
     const [chartData, profile, financials] = await Promise.all([
-      api.chart(symbol, state.tf, day),
+      api.chart(symbol, state.tf, day, prepost),
       state.profile && !symbolChanged ? state.profile : api.profile(symbol).catch(() => null),
       state.financials && !symbolChanged
         ? state.financials
@@ -161,7 +184,9 @@ function syncTfControls() {
     b.classList.toggle("active", b.dataset.tf === state.tf);
   }
   $("intradayGroup").classList.toggle("active", isIntraday());
-  if (isIntraday()) $("intradaySelect").value = state.tf;
+  // show the active intraday TF, or the "Intraday ▾" placeholder otherwise,
+  // so picking any option always fires a change event (1-Min select bug)
+  $("intradaySelect").value = isIntraday() ? state.tf : "";
   $("logToggle").classList.toggle("active", state.log);
   updateReplayBanner();
 }
@@ -231,6 +256,21 @@ $("logToggle").addEventListener("click", () => {
   chart.setLog(state.log);
 });
 
+// ---------------- night mode ----------------
+
+function applyTheme(night) {
+  document.body.classList.toggle("night", night);
+  $("themeToggle").textContent = night ? "☀" : "🌙";
+  $("themeToggle").classList.toggle("active", night);
+  $("themeToggle").title = night ? "Day mode" : "Night mode";
+  chart.setTheme(night);
+  localStorage.setItem("vs.night", night ? "1" : "0");
+}
+$("themeToggle").addEventListener("click", () =>
+  applyTheme(!document.body.classList.contains("night"))
+);
+applyTheme(params.get("night") === "1" || localStorage.getItem("vs.night") === "1");
+
 // ---------------- top-bar utilities: PiP, screenshot, reset ----------------
 
 $("pipBtn").addEventListener("click", () => {
@@ -238,38 +278,115 @@ $("pipBtn").addEventListener("click", () => {
   window.open(url, "vsPip" + Date.now(), "width=1000,height=640,menubar=no,toolbar=no,location=no");
 });
 
-$("shotBtn").addEventListener("click", () => {
-  const src = chart.canvas;
-  const dpr = window.devicePixelRatio || 1;
-  const headH = Math.round(34 * dpr);
-  const out = document.createElement("canvas");
-  out.width = src.width;
-  out.height = src.height + headH;
-  const ctx = out.getContext("2d");
-  ctx.fillStyle = "#fff";
-  ctx.fillRect(0, 0, out.width, out.height);
-  ctx.fillStyle = "#1c2430";
-  ctx.font = `bold ${Math.round(15 * dpr)}px Segoe UI, sans-serif`;
-  const tfName = { d: "Daily", w: "Weekly", m: "Monthly" }[state.tf] || state.tf.slice(1) + " Min";
-  const q = state.quote;
-  let title = `${state.symbol}  ${state.profile?.name || ""}  —  ${tfName}`;
-  if (q?.last != null) title += `  ·  ${fmtPrice(q.last)}`;
-  title += `  ·  ${new Date().toLocaleString()}  ·  VeganSurge`;
-  ctx.fillText(title, Math.round(10 * dpr), Math.round(22 * dpr));
-  ctx.drawImage(src, 0, headH);
-  ctx.drawImage(chart.markupCanvas, 0, headH);
-  const a = document.createElement("a");
-  a.download = `VS_${state.symbol}_${state.tf}_${new Date().toISOString().slice(0, 10)}.png`;
-  a.href = out.toDataURL("image/png");
-  a.click();
-  showToast("Screenshot downloaded");
+$("shotBtn").addEventListener("click", async () => {
+  // Full-window capture: everything from the VeganSurge logo to the bottom
+  // right, pixel-perfect, via tab capture (one-time browser permission).
+  try {
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { displaySurface: "browser" },
+      preferCurrentTab: true,
+      audio: false,
+    });
+    const track = stream.getVideoTracks()[0];
+    const video = document.createElement("video");
+    video.srcObject = stream;
+    await video.play();
+    await new Promise((r) => setTimeout(r, 350)); // let the first frames settle
+    const out = document.createElement("canvas");
+    out.width = video.videoWidth;
+    out.height = video.videoHeight;
+    out.getContext("2d").drawImage(video, 0, 0);
+    track.stop();
+    downloadCanvas(out);
+    showToast("Screenshot downloaded (full window)");
+  } catch {
+    // permission denied / unsupported: fall back to chart-only composition
+    const src = chart.canvas;
+    const dpr = window.devicePixelRatio || 1;
+    const headH = Math.round(40 * dpr);
+    const out = document.createElement("canvas");
+    out.width = src.width;
+    out.height = src.height + headH;
+    const ctx = out.getContext("2d");
+    const night = document.body.classList.contains("night");
+    ctx.fillStyle = night ? "#11161d" : "#fff";
+    ctx.fillRect(0, 0, out.width, out.height);
+    ctx.fillStyle = night ? "#e6ebf2" : "#1c2430";
+    ctx.font = `bold ${Math.round(16 * dpr)}px Segoe UI, sans-serif`;
+    const tfName = { d: "Daily", w: "Weekly", m: "Monthly" }[state.tf] || state.tf.slice(1) + " Min";
+    let title = `VeganSurge  ·  ${state.symbol}  ${state.profile?.name || ""}  —  ${tfName}`;
+    if (state.quote?.last != null) title += `  ·  ${money(state.quote.last)}`;
+    title += `  ·  ${new Date().toLocaleString()}`;
+    ctx.fillText(title, Math.round(12 * dpr), Math.round(26 * dpr));
+    ctx.drawImage(src, 0, headH);
+    ctx.drawImage(chart.markupCanvas, 0, headH);
+    downloadCanvas(out);
+    showToast("Screenshot downloaded (chart only — allow tab capture for full window)");
+  }
 });
+
+function downloadCanvas(cv) {
+  const a = document.createElement("a");
+  a.download = `VeganSurge_${state.symbol}_${state.tf}_${new Date().toISOString().slice(0, 10)}.png`;
+  a.href = cv.toDataURL("image/png");
+  a.click();
+}
 
 $("resetBtn").addEventListener("click", () => {
   chart.resetView();
   tools.resetAll?.();
   showToast("View reset");
 });
+
+// ---------------- auto-update ----------------
+
+async function checkUpdate() {
+  try {
+    const v = await api.version();
+    const btn = $("updateBtn");
+    btn.classList.toggle("has-update", v.behind > 0);
+    btn.title =
+      v.behind > 0
+        ? `Update available — ${v.behind} new commit${v.behind > 1 ? "s" : ""} (click to install)`
+        : `VeganSurge is up to date (${v.current})`;
+    return v;
+  } catch {
+    return null; // git missing / not a checkout — leave the button quiet
+  }
+}
+
+$("updateBtn").addEventListener("click", async () => {
+  const btn = $("updateBtn");
+  btn.disabled = true;
+  showToast("Checking for updates…", 4000);
+  const v = await checkUpdate();
+  if (!v) { showToast("Update check unavailable (git not found)"); btn.disabled = false; return; }
+  if (v.dirty) { showToast("Local changes present — can't auto-update."); btn.disabled = false; return; }
+  if (v.behind === 0) { showToast(`Already up to date (${v.current})`); btn.disabled = false; return; }
+  if (!confirm(`Update VeganSurge?\n${v.behind} new commit${v.behind > 1 ? "s" : ""} will be pulled from GitHub.`)) {
+    btn.disabled = false;
+    return;
+  }
+  try {
+    showToast("Updating…", 60000);
+    const res = await api.update();
+    if (!res.updated) {
+      showToast("Already up to date.");
+    } else if (res.server_changed) {
+      showToast(`Updated to ${res.current}. Restart VeganSurge (run.bat) to apply.`, 12000);
+      checkUpdate();
+    } else {
+      showToast(`Updated to ${res.current}. Reloading…`, 4000);
+      setTimeout(() => location.reload(), 1200);
+    }
+  } catch (e) {
+    showToast("Update failed: " + e.message, 8000);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+checkUpdate(); // quietly flag the button on startup if an update is waiting
 
 // ---------------- alerts ----------------
 
@@ -432,8 +549,10 @@ function renderHeaderStats() {
   pair("EPS Due Date", usDate(p?.nextEarnings));
   pair("50 Days Avg Vol.", p?.avgVolume ? p.avgVolume.toLocaleString("en-US") : null);
   const px = q?.last ?? (d ? d.c[d.c.length - 1] : null);
-  pair("50 Day Avg $ Vol.", p?.avgVolume && px ? "$" + fmtNum(p.avgVolume * px, 2) : null);
-  pair("Market Cap.", p?.marketCap ? "$" + fmtNum(p.marketCap, 2) : null);
+  const curSym = CUR_SYM[state.quote?.currency || "USD"] ?? "";
+  const prefix = curSym && !curSym.startsWith(" ") && curSym !== "p" ? curSym : "";
+  pair("50 Day Avg $ Vol.", p?.avgVolume && px ? prefix + fmtNum(p.avgVolume * px, 2) : null);
+  pair("Market Cap.", p?.marketCap ? prefix + fmtNum(p.marketCap, 2) : null);
   if (d) {
     const atr = atr21Pct(d);
     pair("21 Day ATR %", atr != null ? atr.toFixed(2) + "%" : null);
@@ -463,12 +582,20 @@ function atr21Pct(d, period = 21) {
 
 function renderQuoteHeader(q) {
   if (q.last == null) return;
-  $("qhPrice").textContent = "$" + fmtPrice(q.last);
-  const chg = q.prevClose ? q.last - q.prevClose : null;
-  const pct = q.prevClose ? (chg / q.prevClose) * 100 : null;
+  $("qhPrice").textContent = money(q.last);
+  // prefer the daily chart's prior close when available — Yahoo's quote
+  // prevClose can disagree after big gaps (the VELO bug)
+  let prev = q.prevClose;
+  const d = state.daily?.bars;
+  if (d && d.c.length > 1) {
+    const lastBarDay = new Date(d.t[d.t.length - 1] * 1000).toDateString();
+    if (lastBarDay === new Date(q.ts * 1000).toDateString()) prev = d.c[d.c.length - 2];
+  }
+  const chg = prev ? q.last - prev : null;
+  const pct = prev ? (chg / prev) * 100 : null;
   const el = $("qhChange");
   el.textContent =
-    chg != null ? `(${chg >= 0 ? "+" : "−"}$${Math.abs(chg).toFixed(2)}) ${fmtPct(pct)}` : "";
+    chg != null ? `(${chg >= 0 ? "+" : "−"}${money(Math.abs(chg))}) ${fmtPct(pct)}` : "";
   el.className = clsSign(chg);
   let volTxt = q.volume != null ? `Vol. ${q.volume.toLocaleString("en-US")}` : "";
   const avg = state.profile?.avgVolume;
@@ -520,7 +647,18 @@ function updateLiveStatus() {
   $("liveText").textContent = state.day ? "Replay" : open ? "Live" : "Closed";
 }
 
-setInterval(pollQuote, 4000);
+// ---------------- adjustable quote refresh rate ----------------
+
+let pollTimer = 0;
+function setTick(ms) {
+  clearInterval(pollTimer);
+  pollTimer = setInterval(pollQuote, ms);
+  localStorage.setItem("vs.tick", String(ms));
+  $("tickSelect").value = String(ms);
+}
+$("tickSelect").addEventListener("change", (e) => setTick(Number(e.target.value)));
+setTick(Number(localStorage.getItem("vs.tick")) || 4000);
+
 setInterval(updateLiveStatus, 30000);
 updateLiveStatus();
 
@@ -546,6 +684,19 @@ if (localStorage.getItem("ms.fpCollapsed") === "1") {
   $("fpToggle").textContent = "›";
 }
 
+// watchlist sidebar collapse (the chart re-fits via its ResizeObserver)
+function setWatchlistCollapsed(collapsed) {
+  $("watchlistPanel").classList.toggle("collapsed", collapsed);
+  $("wlCollapse").textContent = collapsed ? "›" : "‹";
+  $("wlCollapse").title = collapsed ? "Expand watchlist" : "Collapse watchlist";
+}
+$("wlCollapse").addEventListener("click", () => {
+  const collapsed = !$("watchlistPanel").classList.contains("collapsed");
+  setWatchlistCollapsed(collapsed);
+  localStorage.setItem("vs.wlCollapsed", collapsed ? "1" : "0");
+});
+if (localStorage.getItem("vs.wlCollapsed") === "1") setWatchlistCollapsed(true);
+
 function renderFloatPanel() {
   const fp = $("floatPanel");
   if (isIntraday() || PIP) {
@@ -561,6 +712,7 @@ function renderFloatPanel() {
     let t = `<table class="annual"><tr><th>Year (${fin.fyMonth})</th><th>EPS ($)</th><th>EPS<br>% Chg</th><th>Sales ($M)</th><th>Sales<br>% Chg</th></tr>`;
     for (const r of fin.annual) {
       const arrow =
+        r.epsPct == null ? "" : // no orphan arrows next to "—"
         r.trend === "up" ? ` <span class="tr-up">▲</span>` :
         r.trend === "down" ? ` <span class="tr-down">▼</span>` : "";
       t += `<tr${r.est ? ' class="est"' : ""}>` +
@@ -616,8 +768,92 @@ function renderFloatPanel() {
     fp.classList.add("hidden");
     return;
   }
+  // weekly/monthly: MarketSurge's portrait "Reports" dock (taller ratings grid)
+  const portrait = state.tf === "w" || state.tf === "m";
+  fp.classList.toggle("portrait", portrait);
+  if (portrait) {
+    parts.length = 0;
+    if (fin?.annual?.length) parts.push(annualTableHTML(fin));
+    parts.push(ratingsGridHTML());
+  }
   $("fpBody").innerHTML = parts.join("");
   fp.classList.remove("hidden");
+}
+
+function annualTableHTML(fin) {
+  let t = `<table class="annual"><tr><th>Year (${fin.fyMonth})</th><th>EPS ($)</th><th>% Chg</th><th>Sales ($M)</th><th>% Chg</th></tr>`;
+  for (const r of fin.annual) {
+    const arrow =
+      r.epsPct == null ? "" :
+      r.trend === "up" ? ` <span class="tr-up">▲</span>` :
+      r.trend === "down" ? ` <span class="tr-down">▼</span>` : "";
+    t += `<tr${r.est ? ' class="est"' : ""}>` +
+      `<td>${r.year}${r.est ? " e" : ""}</td>` +
+      `<td>${r.eps != null ? r.eps.toFixed(2) : "—"}</td>` +
+      `<td class="${pctCls(r.epsPct)}">${pctCell(r.epsPct)}${arrow}</td>` +
+      `<td>${r.sales != null ? fmtSalesM(r.sales) : "—"}</td>` +
+      `<td class="${pctCls(r.salesPct)}">${pctCell(r.salesPct)}</td></tr>`;
+  }
+  return t + "</table>";
+}
+
+// MarketSurge-style ratings/fundamentals grid (two stacked key/value columns)
+function ratingsGridHTML() {
+  const p = state.profile || {};
+  const fin = state.financials || {};
+  const d = state.daily?.bars;
+  const rsr = state.rsRating;
+  const rel = (bars) => {
+    if (!d) return null;
+    const pf = perf(d.c, bars);
+    const bench = state.daily.bench;
+    if (pf == null || !bench) return null;
+    const bp = perf(bench.filter((x) => x != null), bars);
+    return bp == null ? null : pf - bp;
+  };
+  const udv = d ? upDownVolume(d.c, d.v, 50) : null;
+  const pctf = (v, digits = 1) => (v == null ? null : (v * 100).toFixed(digits) + "%");
+
+  const left = [
+    ["RS Rating", rsr ? `<span class="rs-badge">${rsr.rating}</span>` : "…"],
+    ["3 Month RS", rel(63) != null ? fmtPct(rel(63)) : null, clsSign(rel(63))],
+    ["6 Month RS", rel(126) != null ? fmtPct(rel(126)) : null, clsSign(rel(126))],
+    ["12 Month RS", rel(252) != null ? fmtPct(rel(252)) : null, clsSign(rel(252))],
+    ["U/D Vol (50d)", udv ? udv.toFixed(2) : null, udv ? clsSign(udv - 1) : ""],
+    ["ADR (20d)", d ? (adrPct(d.h, d.l, 20)?.toFixed(2) ?? null) + "%" : null],
+    ["Beta", p.beta != null ? p.beta.toFixed(2) : null],
+    ["Dividend Yield", p.dividendYield != null ? pctf(p.dividendYield) : "N/A"],
+    ["Ex-Div Date", p.exDivDate || "N/A"],
+    ["Shares In Float", p.floatShares ? fmtNum(p.floatShares) : null],
+    ["Shares Out", p.sharesOutstanding ? fmtNum(p.sharesOutstanding) : null],
+    ["Inst. Owned", p.instHeldPct != null ? pctf(p.instHeldPct, 0) : null],
+  ];
+  const right = [
+    ["EPS Gro Rate (3y)", fin.epsGrowth3y != null ? fmtPct(fin.epsGrowth3y) : null, clsSign(fin.epsGrowth3y)],
+    ["Earnings Surprise", fin.lastSurprise != null ? fmtPct(fin.lastSurprise) : null, clsSign(fin.lastSurprise)],
+    ["Sales Gro Rate (3y)", fin.salesGrowth3y != null ? fmtPct(fin.salesGrowth3y) : null, clsSign(fin.salesGrowth3y)],
+    ["Net Margin", p.netMargin != null ? pctf(p.netMargin) : null, clsSign(p.netMargin)],
+    ["Gross Margin", p.grossMargin != null ? pctf(p.grossMargin) : null],
+    ["Return on Equity", p.roe != null ? pctf(p.roe, 0) : null, clsSign(p.roe)],
+    ["Debt/Equity", p.debtToEquity != null ? Math.round(p.debtToEquity) + "%" : null],
+    ["P/E (ttm)", p.trailingPE ? p.trailingPE.toFixed(1) : "N/A"],
+    ["Forward P/E", p.forwardPE ? p.forwardPE.toFixed(1) : "N/A"],
+    ["Price to Sales", p.priceToSales != null ? p.priceToSales.toFixed(2) : null],
+    ["Short % Float", p.shortPctFloat != null ? pctf(p.shortPctFloat, 1) : null],
+    ["Days to Cover", p.shortRatio != null ? p.shortRatio.toFixed(1) : null],
+  ];
+  const col = (arr) =>
+    arr
+      .map(([k, v, cls = ""]) =>
+        v != null && v !== "null%"
+          ? `<div class="stat-row"><span class="k">${k}</span><span class="v ${cls}">${v}</span></div>`
+          : "")
+      .join("");
+  return (
+    `<div class="fp-ratings"><div>${col(left)}</div><div>${col(right)}</div></div>` +
+    `<div class="fp-note">Ratings are computable approximations of IBD metrics; ` +
+    `"Top RS in Group" peer ranking requires IBD's database and is omitted.</div>`
+  );
 }
 
 function pctCell(v) {
@@ -685,6 +921,7 @@ function pickSearch(sym) {
 }
 
 function hideSearch() {
+  clearTimeout(searchTimer); // cancel any pending debounced query that would reopen
   searchResults.classList.add("hidden");
   searchItems = [];
   searchSel = -1;
@@ -773,20 +1010,25 @@ function highlightWatchlist() {
 async function refreshWatchlistQuotes() {
   const alertSyms = Object.keys(state.alerts).filter((s) => state.alerts[s].length);
   const syms = [...new Set([...wl(), ...alertSyms])];
-  for (const s of syms) {
-    try {
-      const q = await api.quote(s);
-      checkAlerts(s, q.last);
-      const px = $(`wlp-${s}`), ch = $(`wlc-${s}`);
-      if (!px || q.last == null) continue;
-      px.textContent = fmtPrice(q.last);
-      if (q.prevClose) {
-        const pct = (q.last / q.prevClose - 1) * 100;
-        ch.textContent = fmtPct(pct);
-        ch.className = "chg " + clsSign(pct);
-      }
-    } catch {}
-  }
+  // fan out in parallel — a sequential await-loop serializes every round-trip
+  // and can overrun the 15s tick once a list grows past a handful of symbols.
+  // Each row write re-looks-up its cell, so a list change mid-flight is safe.
+  await Promise.all(
+    syms.map(async (s) => {
+      try {
+        const q = await api.quote(s);
+        checkAlerts(s, q.last);
+        const px = $(`wlp-${s}`), ch = $(`wlc-${s}`);
+        if (!px || q.last == null) return;
+        px.textContent = fmtPrice(q.last);
+        if (q.prevClose) {
+          const pct = (q.last / q.prevClose - 1) * 100;
+          ch.textContent = fmtPct(pct);
+          ch.className = "chg " + clsSign(pct);
+        }
+      } catch {}
+    })
+  );
 }
 
 $("wlAdd").addEventListener("click", () => {

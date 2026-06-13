@@ -10,13 +10,13 @@ Street EPS is preferred where available (matches what IBD displays);
 GAAP fills gaps. Returns plain dicts; caching is handled by data._cached.
 """
 
+import calendar
 import math
+import os
 from datetime import date, datetime, timedelta, timezone
 
 import requests
 import yfinance as yf
-
-import os
 
 # SEC asks automated clients to identify themselves with a contact address.
 # Each user should set their own: VEGANSURGE_CONTACT=you@example.com
@@ -209,6 +209,49 @@ def get_financials(symbol):
             }
         )
     quarterly = quarterly[-40:]
+
+    # ---------- forward quarterly estimates (next two quarters) ----------
+    if quarterly:
+        try:
+            t = yf.Ticker(symbol)
+            ee = t.earnings_estimate
+            re_ = t.revenue_estimate
+            last_end = date.fromisoformat(quarterly[-1]["end"])
+            for i, key in enumerate(["0q", "+1q"]):
+                eps_est = sales_est = None
+                if ee is not None and key in ee.index:
+                    eps_est = _clean(float(ee.loc[key, "avg"]))
+                if re_ is not None and key in re_.index:
+                    sales_est = _clean(float(re_.loc[key, "avg"]))
+                if eps_est is None and sales_est is None:
+                    continue
+                # estimate quarter ends ~3 months after the prior quarter
+                m = last_end.month + 3 * (i + 1)
+                y = last_end.year + (m - 1) // 12
+                m = (m - 1) % 12 + 1
+                e = date(y, m, min(last_end.day, calendar.monthrange(y, m)[1]))
+                eps_prior = _year_ago(e, eps_q_street) or _year_ago(e, eps_q_gaap)
+                sales_prior = _year_ago(e, rev_q)
+                sp = _clean(round(sales_prior / 1e6, 1)) if sales_prior is not None else None
+                se = _clean(round(sales_est / 1e6, 1)) if sales_est is not None else None
+                quarterly.append(
+                    {
+                        "end": e.isoformat(),
+                        "t": int(datetime(e.year, e.month, e.day, tzinfo=timezone.utc).timestamp()),
+                        "label": e.strftime("%b %y") + "e",
+                        "full": "Qtr Ends " + e.strftime("%B %Y"),
+                        "eps": _clean(round(eps_est, 2)) if eps_est is not None else None,
+                        "epsPrior": _clean(round(eps_prior, 2)) if eps_prior is not None else None,
+                        "epsPct": _pct(eps_est, eps_prior),
+                        "sales": se,
+                        "salesPrior": sp,
+                        "salesPct": _pct(sales_est, sales_prior),
+                        "report": None,
+                        "est": True,
+                    }
+                )
+        except Exception:
+            pass
 
     # ---------- annual table ----------
     annual = []

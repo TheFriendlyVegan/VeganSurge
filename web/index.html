@@ -8,7 +8,16 @@
 </head>
 <body>
 <header id="topbar">
-  <div class="logo">Vegan<span>Surge</span></div>
+  <div class="logo">Vegan<span>Surge</span><sup id="version" title="What's new in v1.1:
+· Reworked IBD base detection (cup, cup w/ handle, double bottom, flat) with proper left-side/handle pivots
+· Beautiful base outlines + breakout-day flag (pivot line clipped to the breakout candle)
+· Night mode (🌙) — themed palette for every chart type
+· Weekly/monthly Reports dock (annual table + ratings grid)
+· Forward quarterly estimates in the chart footer
+· Currency detection for international stocks
+· Extended/pre-market data toggle · adjustable quote refresh
+· Full-window screenshots
+· Fixed: search dropdown hang, 1-Min select, VELO daily-move, weekly render crash">v1.1</sup></div>
 
   <div id="searchBox">
     <input id="searchInput" type="text" placeholder="Symbol or company…" autocomplete="off" spellcheck="false">
@@ -23,9 +32,10 @@
 
   <div class="btn-group" id="intradayGroup">
     <select id="intradaySelect" title="Intraday timeframe">
+      <option value="" disabled selected hidden>Intraday ▾</option>
       <option value="i1">1 Min</option>
       <option value="i5">5 Min</option>
-      <option value="i10" selected>10 Min</option>
+      <option value="i10">10 Min</option>
       <option value="i15">15 Min</option>
       <option value="i60">60 Min</option>
     </select>
@@ -39,11 +49,23 @@
 
   <div class="btn-group">
     <button id="logToggle" class="active" title="Logarithmic price scale">Log</button>
+    <button id="themeToggle" title="Night mode">🌙</button>
   </div>
 
   <div class="spacer"></div>
 
+  <div class="btn-group" id="tickGroup" title="Quote refresh rate">
+    <select id="tickSelect">
+      <option value="2000">2s · turbo</option>
+      <option value="4000" selected>4s · default</option>
+      <option value="10000">10s · relaxed</option>
+      <option value="30000">30s · light</option>
+      <option value="60000">60s · minimal</option>
+    </select>
+  </div>
+
   <div class="btn-group" id="utilButtons">
+    <button id="updateBtn" title="Check for updates">⬆</button>
     <button id="pipBtn" title="Open chart in a separate window">⧉</button>
     <button id="shotBtn" title="Download chart screenshot">⤓</button>
     <button id="resetBtn" title="Reset view to defaults">⟲</button>
@@ -92,6 +114,7 @@
 <main>
   <aside id="watchlistPanel">
     <div class="panel-head">
+      <button id="wlCollapse" title="Collapse watchlist">‹</button>
       <select id="listSelect" title="Watchlist"></select>
       <span class="panel-head-btns">
         <button id="listNew" title="New list">＋</button>

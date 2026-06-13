@@ -9,4 +9,8 @@ build/
 dist/
 *.spec
 shot*.png
+# transient verification screenshots
+crop_*.png
+fv_*.png
+v11*.png
 *.log

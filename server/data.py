@@ -54,14 +54,14 @@ def _clean(v):
     return v
 
 
-def _history_arrays(symbol, period, interval, start=None, end=None):
+def _history_arrays(symbol, period, interval, start=None, end=None, prepost=False):
     if start:
         df = yf.Ticker(symbol).history(
-            start=start, end=end, interval=interval, auto_adjust=True
+            start=start, end=end, interval=interval, auto_adjust=True, prepost=prepost
         )
     else:
         df = yf.Ticker(symbol).history(
-            period=period, interval=interval, auto_adjust=True
+            period=period, interval=interval, auto_adjust=True, prepost=prepost
         )
     if df is None or df.empty:
         return None
@@ -101,7 +101,7 @@ def _aggregate(bars, group_secs):
     return out
 
 
-def get_chart(symbol, tf, day=None):
+def get_chart(symbol, tf, day=None, prepost=False):
     symbol = symbol.upper().strip()
     if tf == "i":
         tf = "i10"  # legacy alias
@@ -109,6 +109,7 @@ def get_chart(symbol, tf, day=None):
         raise ValueError(f"unknown timeframe {tf!r}")
     period, interval, ttl, agg = TIMEFRAMES[tf]
     intraday = tf.startswith("i")
+    prepost = bool(prepost) and intraday  # extended hours: intraday only
     if day and not intraday:
         day = None  # day replay only applies to intraday views
 
@@ -123,6 +124,7 @@ def get_chart(symbol, tf, day=None):
             bars = _history_arrays(
                 symbol, None, interval,
                 start=d0.isoformat(), end=(d0 + _dt.timedelta(days=1)).isoformat(),
+                prepost=prepost,
             )
             if bars is None:
                 return {
@@ -130,13 +132,13 @@ def get_chart(symbol, tf, day=None):
                     "(Yahoo keeps ~30 days of 1-min and ~60 days of 5-min data)"
                 }
         else:
-            bars = _history_arrays(symbol, period, interval)
+            bars = _history_arrays(symbol, period, interval, prepost=prepost)
             if bars is None:
                 return {"error": f"no data for {symbol}"}
         if agg:
             bars = _aggregate(bars, agg)
 
-        result = {"symbol": symbol, "tf": tf, "bars": bars, "day": day}
+        result = {"symbol": symbol, "tf": tf, "bars": bars, "day": day, "prepost": prepost}
 
         # Benchmark closes aligned to the same timestamps, for the RS line.
         if tf in ("d", "w", "m"):
@@ -167,7 +169,7 @@ def get_chart(symbol, tf, day=None):
         return result
 
     cache_ttl = 3600 if day and day != time.strftime("%Y-%m-%d") else ttl
-    return _cached(("chart", symbol, tf, day), cache_ttl, build)
+    return _cached(("chart", symbol, tf, day, prepost), cache_ttl, build)
 
 
 def _earnings(symbol):
@@ -200,10 +202,20 @@ def get_quote(symbol):
 
     def build():
         fi = yf.Ticker(symbol).fast_info
+        # fast_info.previous_close is loosely derived and can be wrong after
+        # big gaps (VELO bug); the regular-market field is authoritative.
+        prev = None
+        try:
+            prev = _clean(fi.regular_market_previous_close)
+        except Exception:
+            pass
+        if prev is None:
+            prev = _clean(fi.previous_close)
         return {
             "symbol": symbol,
             "last": _clean(fi.last_price),
-            "prevClose": _clean(fi.previous_close),
+            "prevClose": prev,
+            "currency": getattr(fi, "currency", None),
             "open": _clean(fi.open),
             "dayHigh": _clean(fi.day_high),
             "dayLow": _clean(fi.day_low),
@@ -265,6 +277,24 @@ def get_profile(symbol):
             "low52": _clean(info.get("fiftyTwoWeekLow")),
             "avgVolume": _clean(info.get("averageVolume")),
             "nextEarnings": next_earnings,
+            # expanded fundamentals for the weekly/monthly Reports dock
+            "beta": _clean(info.get("beta")),
+            "priceToSales": _clean(info.get("priceToSalesTrailing12Months")),
+            "roe": _clean(info.get("returnOnEquity")),
+            "netMargin": _clean(info.get("profitMargins")),
+            "grossMargin": _clean(info.get("grossMargins")),
+            "ebitdaMargin": _clean(info.get("ebitdaMargins")),
+            "dividendYield": _clean(info.get("dividendYield")),
+            "exDivDate": (
+                time.strftime("%m/%d/%Y", time.gmtime(int(info["exDividendDate"])))
+                if info.get("exDividendDate")
+                else None
+            ),
+            "debtToEquity": _clean(info.get("debtToEquity")),
+            "shortPctFloat": _clean(info.get("shortPercentOfFloat")),
+            "shortRatio": _clean(info.get("shortRatio")),
+            "instHeldPct": _clean(info.get("heldPercentInstitutions")),
+            "currency": info.get("currency") or info.get("financialCurrency"),
         }
 
     return _cached(("profile", symbol), 1800, build)
